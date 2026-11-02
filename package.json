@@ -1,0 +1,17 @@
+{
+  "name": "ghl-setter-bot",
+  "version": "1.0.0",
+  "description": "GHL × Claude webhook server for Kimberly Ring setter automation",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0"
+  }
+}
