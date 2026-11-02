@@ -14,6 +14,9 @@ const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 // ─── Draft queue ────────────────────────────────────────────────────────────
 const draftQueue = [];
 
+// ─── Seen messages tracker (poll dedup) ─────────────────────────────────────
+const seenMessageIds = new Set();
+
 // ─── Notification schedule (CT) ─────────────────────────────────────────────
 const DIGEST_HOURS_CT = [9, 13, 17, 20]; // 9am, 1pm, 5pm, 8pm
 
@@ -33,6 +36,14 @@ const GHL_HEADERS = {
   Version: '2021-04-15',
   'Content-Type': 'application/json',
 };
+
+async function getRecentConversations() {
+  const res = await axios.get(
+    `${GHL_BASE}/conversations/search?locationId=${process.env.GHL_LOCATION_ID}&limit=20`,
+    { headers: GHL_HEADERS }
+  );
+  return res.data.conversations || [];
+}
 
 async function getConversationMessages(conversationId) {
   const res = await axios.get(
@@ -63,7 +74,6 @@ async function sendGHLMessage(conversationId, message) {
 }
 
 async function updateOpportunityStage(contactId, stage) {
-  // Get opportunities for contact first
   const res = await axios.get(
     `${GHL_BASE}/opportunities/search?contact_id=${contactId}&location_id=${process.env.GHL_LOCATION_ID}`,
     { headers: GHL_HEADERS }
@@ -80,7 +90,6 @@ async function updateOpportunityStage(contactId, stage) {
 }
 
 async function updateContactTags(contactId, tagsToAdd, tagsToRemove) {
-  // Add tags
   if (tagsToAdd?.length) {
     await axios.post(
       `${GHL_BASE}/contacts/${contactId}/tags`,
@@ -88,7 +97,6 @@ async function updateContactTags(contactId, tagsToAdd, tagsToRemove) {
       { headers: GHL_HEADERS }
     );
   }
-  // Remove tags
   if (tagsToRemove?.length) {
     await axios.delete(
       `${GHL_BASE}/contacts/${contactId}/tags`,
@@ -179,7 +187,7 @@ Priority is "high" if: lead says they want to book, raises a price/objection, or
 
 async function generateDraft(contact, messages) {
   const conversationText = messages
-    .slice(-20) // last 20 messages for context
+    .slice(-20)
     .map(m => `${m.direction === 'inbound' ? contact.firstName || 'Lead' : 'Kimberly'}: ${m.body}`)
     .join('\n');
 
@@ -227,8 +235,67 @@ async function sendDigest() {
   }
 }
 
-// ─── Scheduled digest ────────────────────────────────────────────────────────
+// ─── POLL: check GHL for new inbound messages ─────────────────────────────────
+async function pollGHL() {
+  try {
+    const conversations = await getRecentConversations();
+
+    for (const convo of conversations) {
+      // Only process conversations with unread inbound messages
+      if (!convo.unreadCount || convo.unreadCount === 0) continue;
+
+      const messages = await getConversationMessages(convo.id);
+      const newInbound = messages.filter(
+        m => m.direction === 'inbound' && !seenMessageIds.has(m.id)
+      );
+
+      if (!newInbound.length) continue;
+
+      // Mark all as seen
+      for (const m of messages) seenMessageIds.add(m.id);
+
+      // Skip if we already have a pending draft for this conversation
+      const alreadyQueued = draftQueue.find(
+        d => d.conversationId === convo.id && d.status === 'pending'
+      );
+      if (alreadyQueued) continue;
+
+      const contact = await getContact(convo.contactId);
+      const claudeResponse = await generateDraft(contact, messages);
+
+      const draftId = crypto.randomUUID();
+      const draft = {
+        id: draftId,
+        contactId: convo.contactId,
+        conversationId: convo.id,
+        contactName: `${contact.firstName} ${contact.lastName || ''}`.trim(),
+        draft_message: claudeResponse.draft_message,
+        recommended_action: claudeResponse.recommended_action,
+        priority: claudeResponse.priority,
+        bucket: claudeResponse.bucket,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+
+      draftQueue.push(draft);
+      console.log(`Queued draft for ${draft.contactName} (${draft.priority} priority)`);
+
+      // Immediate alert for high priority
+      if (claudeResponse.priority === 'high' && !isQuietHours()) {
+        await sendDigest();
+      }
+    }
+  } catch (err) {
+    console.error('Poll error:', err.message);
+  }
+}
+
+// ─── Scheduled digest + poll ──────────────────────────────────────────────────
 function scheduleDigests() {
+  // Poll GHL every 3 minutes
+  setInterval(pollGHL, 3 * 60 * 1000);
+
+  // Send digests at scheduled hours
   setInterval(async () => {
     if (isQuietHours()) return;
     const now = nowCT();
@@ -237,51 +304,8 @@ function scheduleDigests() {
     if (DIGEST_HOURS_CT.includes(hour) && minute === 0) {
       await sendDigest();
     }
-  }, 60 * 1000); // check every minute
+  }, 60 * 1000);
 }
-
-// ─── Webhook endpoint ─────────────────────────────────────────────────────────
-app.post('/webhook/inbound', async (req, res) => {
-  res.sendStatus(200); // acknowledge immediately
-
-  try {
-    const { contactId, conversationId, type, direction } = req.body;
-
-    // Only process inbound messages
-    if (direction !== 'inbound') return;
-    if (!contactId || !conversationId) return;
-
-    const [contact, messages] = await Promise.all([
-      getContact(contactId),
-      getConversationMessages(conversationId),
-    ]);
-
-    const claudeResponse = await generateDraft(contact, messages);
-
-    const draftId = crypto.randomUUID();
-    const draft = {
-      id: draftId,
-      contactId,
-      conversationId,
-      contactName: `${contact.firstName} ${contact.lastName || ''}`.trim(),
-      draft_message: claudeResponse.draft_message,
-      recommended_action: claudeResponse.recommended_action,
-      priority: claudeResponse.priority,
-      bucket: claudeResponse.bucket,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-
-    draftQueue.push(draft);
-
-    // Immediate notification for high priority
-    if (claudeResponse.priority === 'high' && !isQuietHours()) {
-      await sendDigest();
-    }
-  } catch (err) {
-    console.error('Webhook error:', err.message);
-  }
-});
 
 // ─── Telegram webhook (for button callbacks) ──────────────────────────────────
 app.post('/telegram/webhook', async (req, res) => {
@@ -350,7 +374,10 @@ app.get('/health', (_, res) => res.json({ status: 'ok', queueLength: draftQueue.
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Setter bot running on port ${PORT}`);
   scheduleDigests();
+  // Run first poll immediately on startup
+  console.log('Running initial GHL poll...');
+  await pollGHL();
 });
