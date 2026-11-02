@@ -53,7 +53,11 @@ async function getConversationMessages(conversationId) {
     `${GHL_BASE}/conversations/${conversationId}/messages`,
     { headers: GHL_HEADERS }
   );
-  return res.data.messages || [];
+  // GHL returns { messages: { messages: [...] } } or { messages: [...] }
+  const data = res.data.messages;
+  if (Array.isArray(data)) return data;
+  if (data?.messages && Array.isArray(data.messages)) return data.messages;
+  return [];
 }
 
 async function getContact(contactId) {
