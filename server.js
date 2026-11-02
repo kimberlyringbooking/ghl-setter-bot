@@ -214,7 +214,9 @@ Draft a reply and recommend a pipeline action. Return JSON only.`;
     messages: [{ role: 'user', content: userPrompt }],
   });
 
-  const text = response.content[0].text.trim();
+  let text = response.content[0].text.trim();
+  // Strip markdown code fences if present
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   return JSON.parse(text);
 }
 
