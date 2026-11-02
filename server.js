@@ -39,8 +39,11 @@ const GHL_HEADERS = {
 
 async function getRecentConversations() {
   const res = await axios.get(
-    `${GHL_BASE}/conversations/search?locationId=${process.env.GHL_LOCATION_ID}&limit=20`,
-    { headers: GHL_HEADERS }
+    `${GHL_BASE}/conversations/search`,
+    {
+      headers: GHL_HEADERS,
+      params: { locationId: process.env.GHL_LOCATION_ID, limit: 20 }
+    }
   );
   return res.data.conversations || [];
 }
@@ -237,8 +240,10 @@ async function sendDigest() {
 
 // ─── POLL: check GHL for new inbound messages ─────────────────────────────────
 async function pollGHL() {
+  console.log(`[poll] Checking GHL at ${new Date().toISOString()}`);
   try {
     const conversations = await getRecentConversations();
+    console.log(`[poll] Found ${conversations.length} conversations`);
 
     for (const convo of conversations) {
       // Only process conversations with unread inbound messages
@@ -286,7 +291,10 @@ async function pollGHL() {
       }
     }
   } catch (err) {
-    console.error('Poll error:', err.message);
+    console.error('[poll] Error:', err.message);
+    if (err.response) {
+      console.error('[poll] GHL response:', err.response.status, JSON.stringify(err.response.data));
+    }
   }
 }
 
