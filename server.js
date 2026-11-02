@@ -291,8 +291,8 @@ async function pollGHL() {
       draftQueue.push(draft);
       console.log(`Queued draft for ${draft.contactName} (${draft.priority} priority)`);
 
-      // Immediate alert for high priority
-      if (claudeResponse.priority === 'high' && !isQuietHours()) {
+      // Immediate alert for high priority — bypasses quiet hours
+      if (claudeResponse.priority === 'high') {
         await sendDigest();
       }
     }
